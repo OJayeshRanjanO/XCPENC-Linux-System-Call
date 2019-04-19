@@ -1,0 +1,124 @@
+DESCRIPTION
+-----------
+Implementation of syscall that does the following operations on 2 files
+- ENCRYPTION
+- DECRYPTION
+- COPY
+
+
+DESIGN
+------
+
+USER-LAND -
+getopt is used to validate and retrieve all arguements passed by user.
+Arguements are packed inside user_args struct which contains the following structure:
+struct user_args
+{
+   char * infile; --File names are assumed to be null terminated so I am using char *
+   char * outfile; 
+   void * keybuf; -- keybuf can be a non null terminated string
+   int keylen; -- keylen should be the same length as keybuf
+   short flags;
+} ;
+
+keybuf is hashed using md5. 
+The function I am using is called void compute_md5(char * string, void ** digest, int keylen)[1]
+In this case 
+* string is keybuf
+**digest is address to a void * buffer in main()
+keylen is same as keylen
+
+
+The struct user_args * ag contains information that we need to pass to the KERNEL-LAND
+Every * variable is initialized to NULL and every primitive type is initialized to 0
+This makes it easy for us to free, as we need to check for non-NULL values at the end of the function.
+The exit_function label makes a unconditional jump to the near end of the code, if any error is encounted.
+The rc is set to the value of the error and later the errno is also set.
+
+The switch from USER-LAND to KERNEL-LAND happens with
+void *dummy = (void *) ag; -- We cast the struct user_args to a void pointer and pass it as arguement to the syscall
+rc = syscall(__NR_cpenc, dummy); -- The syscall only takes 1 arguement.
+
+
+
+
+KERNEL-LAND - 
+I am using a header file called sys_cpenc.h which contains all structs and declarations of sys_cpenc.c
+
+Similar to the USER-LAND all declarations are done at the beginning of the function and initialized NULL or 0
+This makes it easier to handle error
+
+In the KERNEL-LAND I have a replica of struct user_args to copy in the bytes.
+I am using copy_from_user() to move void * arg from user address space to kernal address space.
+For input and outfile files I am using getname() and putname()
+For keybuf, I have keylen. access_ok() is used to make sure that the length of bytes specified in keylen is the number of bytes available in keybuf.
+The md5 hash in md5() function is used to encrypt the keybuf passed with the length specified 
+
+
+The layout of the code is put in a way that right after allocating space for input and output file
+We have the first checks where things could go wrong - The flags, followed by file
+The flags have to be either 1 (-e), 2(-d) or 4(-c).
+Whereas in case of file
+The first check is the input file is regular (not a directory)
+Check if both the files have the same name
+Check if both of them have the same inode number
+
+NOTE: We skip the next 2 paragraphs when copying to a file
+Now we use to key and hash it with md5 using the md5(char * string, void ** digest, int keylen)[2].
+The result of the digest is stored in rehash
+which is similar to our USER-LAND program but with extra checks.
+
+After this finally we OPEN both the files with the permission of the input file
+Incase of Encryption
+	The rehash is written to the file. 
+	This is my PREAMBLE
+Incase of Decryption
+	First I check if there is atleast 16 bytes in the file. If not then stop execution and return back error
+	If there are 16 bytes
+		Then read those bytes and using memcmp to check if it matches with the rehash
+		continue
+		Otherwise stop execution and return error
+
+Finally we get to the part where the file is de/en-crypted.
+A counter which is the size of the file is managed, with every iteration PAGE_SIZE (or size of the remaining bytes) is 
+thrown into cipher() function and encrypted.
+Incase the cipher fails, vfs_unlink()[4] is used to remove the output file
+ 
+Next we have the meat of this program. The cipher algorithm which is defined in cipher(void ** buffer, int buffer_size, void * key,int enc_dec_flag)[3].
+Which calls another function - encdec(struct skcipher_def *sk,int enc)[3] which does the actual encryption/decryption 
+For this I am using ctr(aes). Mostly because it's easy to use and I do not have to worry about padding extra bytes.
+However, the number of bytes (buffer_size) had to match with the number of bytes passed in void** buffer.
+The enc_dec_flag works simply like a boolean to switch between encrypt(1) and decrypt(0).
+
+Most of these buffers are void. The only ones that are char is infile and outfile buffer.
+The reason behind this is because both void * buffer and void * key can contain non-ascii character and ocassional null bytes which could signify end of string.
+However, in reality there could be more bytes after, what seems to be the end '\0'.
+
+
+PS:
+One key design choice in mind was to minimize the time the code would have to run, before an error is detected.
+Also at the same time not have an unnatural execution pattern 
+For example - calculating the hash before checking correctness of file.
+This holds up space in memory that is supposed to be used much later. 
+Rather I tried my best to make sure everything stored in constantly being used for some operation (Drecreasing liveliness of a variable) 
+
+Another design choice was to ensure using a single goto place incase error happens.
+This makes it easier to clean up code.
+
+
+FILES ATTACHED
+--------------
+Makefile
+sys_cpenc.c
+sys_cpenc.h
+xhw1.c
+/scripts
+
+
+
+CITATIONS
+---------
+[1] https://stackoverflow.com/questions/7627723/how-to-create-a-md5-hash-of-a-string-in-c
+[2] Source code taken from: https://stackoverflow.com/questions/11126027/using-md5-in-kernel-space-of-linux
+[3] Source code taken from: https://www.kernel.org/doc/html/v4.11/crypto/api-samples.html
+[4] https://stackoverflow.com/questions/7627723/how-to-create-a-md5-hash-of-a-string-in-c 
